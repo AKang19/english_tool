@@ -1,8 +1,8 @@
 import datetime
 import uuid
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -53,3 +53,17 @@ class Word(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     group: Mapped["WordGroup"] = relationship("WordGroup", back_populates="words")
+
+
+class Article(Base):
+    __tablename__ = "articles"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    input_words: Mapped[list] = mapped_column(JSON, nullable=False)  # ["word1", "word2", ...]
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)  # "article" or "dialogue"
+    ratio: Mapped[float] = mapped_column(Float, nullable=False, default=0.9)
+    sentences: Mapped[list] = mapped_column(JSON, nullable=False)  # [{speaker?, text}, ...]
+    used_words: Mapped[list] = mapped_column(JSON, nullable=False)  # ["word1", ...]
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
