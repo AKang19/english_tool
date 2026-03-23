@@ -137,4 +137,77 @@ export async function searchWords(q: string): Promise<WordSearchResult[]> {
   return res.data;
 }
 
+// --- Article ---
+
+export interface ArticleSentence {
+  speaker: string | null;
+  text: string;
+}
+
+export interface GenerateArticleResponse {
+  title: string;
+  sentences: ArticleSentence[];
+  used_words: string[];
+}
+
+export async function generateArticle(data: {
+  words: string[];
+  mode: string;
+  ratio: number;
+}): Promise<GenerateArticleResponse> {
+  const res = await api.post("/generate-article", data);
+  return res.data;
+}
+
+export async function downloadAudio(sentences: ArticleSentence[]): Promise<Blob> {
+  const res = await api.post("/generate-audio", { sentences }, { responseType: "blob" });
+  return res.data;
+}
+
+export async function downloadVideo(sentences: ArticleSentence[]): Promise<Blob> {
+  const res = await api.post("/generate-video", { sentences }, { responseType: "blob", timeout: 300000 });
+  return res.data;
+}
+
+export interface ArticleSummary {
+  id: string;
+  title: string;
+  mode: string;
+  created_at: string;
+}
+
+export interface ArticleDetail extends GenerateArticleResponse {
+  id: string;
+  input_words: string[];
+  mode: string;
+  ratio: number;
+  created_at: string;
+}
+
+export async function saveArticle(data: {
+  title: string;
+  input_words: string[];
+  mode: string;
+  ratio: number;
+  sentences: ArticleSentence[];
+  used_words: string[];
+}): Promise<ArticleDetail> {
+  const res = await api.post("/articles", data);
+  return res.data;
+}
+
+export async function listArticles(): Promise<ArticleSummary[]> {
+  const res = await api.get("/articles");
+  return res.data;
+}
+
+export async function getArticle(id: string): Promise<ArticleDetail> {
+  const res = await api.get(`/articles/${id}`);
+  return res.data;
+}
+
+export async function deleteArticle(id: string): Promise<void> {
+  await api.delete(`/articles/${id}`);
+}
+
 export default api;

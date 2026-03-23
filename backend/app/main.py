@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import engine
 from app.models import Base
-from app.routers import auth, llm, words
+from app.routers import article, auth, llm, words
 
 
 @asynccontextmanager
@@ -30,6 +30,7 @@ app.add_middleware(
     expose_headers=["Content-Disposition"],
 )
 
+app.include_router(article.router)
 app.include_router(auth.router)
 app.include_router(llm.router)
 app.include_router(words.router)
