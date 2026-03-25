@@ -252,6 +252,55 @@ async def generate_video(
     )
 
 
+# --- Article PDF ---
+
+class ArticlePdfRequest(BaseModel):
+    title: str
+    sentences: list[Sentence]
+
+
+@router.post("/generate-article-pdf")
+async def generate_article_pdf(
+    request: ArticlePdfRequest,
+    user: User = Depends(get_current_user),
+):
+    from urllib.parse import quote
+    from fpdf import FPDF
+
+    font_path = "/app/fonts/NotoSansTC-Regular.otf"
+
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    if os.path.exists(font_path):
+        pdf.add_font("NotoSans", "", font_path, uni=True)
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    pdf.set_font("NotoSans", size=16)
+    pdf.cell(0, 10, request.title, new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    pdf.set_font("NotoSans", size=11)
+    for s in request.sentences:
+        if s.speaker:
+            pdf.set_font("NotoSans", size=11)
+            pdf.set_text_color(24, 144, 255)
+            pdf.write(7, f"{s.speaker}: ")
+            pdf.set_text_color(0, 0, 0)
+            pdf.multi_cell(0, 7, s.text)
+        else:
+            pdf.multi_cell(0, 7, s.text)
+        pdf.ln(2)
+
+    buffer = io.BytesIO(pdf.output())
+    filename = f"{request.title}.pdf"
+    encoded = quote(filename)
+    return StreamingResponse(
+        buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"},
+    )
+
+
 # --- Save / Load Articles ---
 
 @router.post("/articles", response_model=ArticleOut)

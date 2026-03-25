@@ -24,7 +24,7 @@ import {
   SendOutlined,
 } from "@ant-design/icons";
 import type { ArticleSentence, ArticleSummary, GenerateArticleResponse } from "../api";
-import {
+import api, {
   generateArticle,
   downloadAudio,
   downloadVideo,
@@ -175,6 +175,49 @@ export default function ArticlePage() {
     }
   };
 
+  const getPlainText = () => {
+    if (!result) return "";
+    return result.sentences
+      .map((s) => (s.speaker ? `${s.speaker}: ${s.text}` : s.text))
+      .join("\n");
+  };
+
+  const handleCopyText = () => {
+    navigator.clipboard.writeText(getPlainText());
+    message.success("已複製到剪貼簿");
+  };
+
+  const handleDownloadTxt = () => {
+    if (!result) return;
+    const blob = new Blob([getPlainText()], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${result.title}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDownloadArticlePdf = async () => {
+    if (!result) return;
+    try {
+      const res = await api.post(
+        "/generate-article-pdf",
+        { title: result.title, sentences: result.sentences },
+        { responseType: "blob" }
+      );
+      const blob = new Blob([res.data], { type: "application/pdf" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${result.title}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      message.error("PDF 下載失敗");
+    }
+  };
+
   const highlightText = (text: string) => {
     if (!result?.used_words?.length) return text;
     const pattern = new RegExp(
@@ -314,6 +357,15 @@ export default function ArticlePage() {
               loading={videoLoading}
             >
               下載 MP4
+            </Button>
+            <Button icon={<DownloadOutlined />} onClick={handleDownloadTxt}>
+              下載 TXT
+            </Button>
+            <Button icon={<DownloadOutlined />} onClick={handleDownloadArticlePdf}>
+              下載 PDF
+            </Button>
+            <Button icon={<CopyOutlined />} onClick={handleCopyText}>
+              複製文字
             </Button>
           </Space>
         </Card>
