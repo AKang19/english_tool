@@ -27,6 +27,7 @@ import {
   ReloadOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
+import SpeakButton from "../components/SpeakButton";
 import type { ReviewWord, ReviewStats, ReviewWordStat, ExportWord } from "../api";
 import api, { getReviewWords, logReview, getReviewStats, exportTopWords } from "../api";
 
@@ -544,9 +545,12 @@ export default function ReviewPage() {
         onClick={!flipped ? handleFlip : undefined}
       >
         {/* English - always visible */}
-        <Title level={1} style={{ marginBottom: flipped ? 24 : 0, fontSize: 42 }}>
-          {currentWord?.english}
-        </Title>
+        <Space align="center">
+          <Title level={1} style={{ marginBottom: flipped ? 24 : 0, fontSize: 42 }}>
+            {currentWord?.english}
+          </Title>
+          {currentWord && <SpeakButton text={currentWord.english} size="large" />}
+        </Space>
 
         {/* Flipped content */}
         {flipped && currentWord && (
