@@ -1,11 +1,11 @@
-import csv
+"""Word group CRUD, CSV upload/export, PDF export, search, and batch operations."""
+
+import csv as csv_module
 import io
-import os
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
 from pydantic import BaseModel as PydanticBaseModel
-from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -23,11 +23,15 @@ from app.schemas import (
     WordSearchResult,
     WordUpdate,
 )
+from app.services.export_service import build_csv_response
+from app.services.file_store import save_file
 from app.services.llm_service import generate_words
+from app.services.pdf_service import build_word_group_pdf
 
 router = APIRouter(prefix="/api", tags=["words"])
 
-# Column detection keywords
+# --- CSV Column Detection ---
+
 _COLUMN_PATTERNS: dict[str, list[str]] = {
     "english": ["english", "eng", "英文", "單字", "word", "vocabulary", "vocab"],
     "chinese": ["chinese", "中文", "翻譯", "解釋", "meaning", "definition", "chi", "中文解釋"],
@@ -46,6 +50,8 @@ def _detect_column(header: str) -> str | None:
     return None
 
 
+# --- CSV Upload ---
+
 @router.post("/upload-csv")
 async def upload_csv(
     file: UploadFile,
@@ -56,7 +62,6 @@ async def upload_csv(
         raise HTTPException(status_code=400, detail="請上傳 CSV 檔案")
 
     content = await file.read()
-    # Try utf-8 first, fallback to big5 (common for Traditional Chinese CSVs)
     for encoding in ("utf-8-sig", "utf-8", "big5", "gbk"):
         try:
             text = content.decode(encoding)
@@ -66,28 +71,24 @@ async def upload_csv(
     else:
         raise HTTPException(status_code=400, detail="無法解析檔案編碼")
 
-    reader = csv.DictReader(io.StringIO(text))
+    reader = csv_module.DictReader(io.StringIO(text))
     if not reader.fieldnames:
         raise HTTPException(status_code=400, detail="CSV 沒有欄位標題")
 
-    # Auto-detect column mapping
-    col_map: dict[str, str] = {}  # csv_header -> our_field
+    col_map: dict[str, str] = {}
     for header in reader.fieldnames:
         field = _detect_column(header)
         if field and field not in col_map.values():
             col_map[header] = field
 
     if "english" not in col_map.values():
-        raise HTTPException(status_code=400, detail="找不到英文欄位，請確認 CSV 標題包含 english/英文/單字 等關鍵字")
+        raise HTTPException(status_code=400, detail="找不到英文欄位")
 
     words = []
     for row in reader:
         word: dict[str, str | None] = {
-            "english": None,
-            "chinese": None,
-            "kk_phonetic": None,
-            "mnemonic": None,
-            "example_sentence": None,
+            "english": None, "chinese": None, "kk_phonetic": None,
+            "mnemonic": None, "example_sentence": None,
         }
         for csv_header, field in col_map.items():
             val = row.get(csv_header, "").strip()
@@ -99,11 +100,10 @@ async def upload_csv(
     if not words:
         raise HTTPException(status_code=400, detail="CSV 中沒有有效的單字資料")
 
-    # Look up existing words in DB for ALL fields
+    # Look up existing words in DB
     english_list = [w["english"].lower() for w in words]
     result = await db.execute(
-        select(Word)
-        .join(WordGroup)
+        select(Word).join(WordGroup)
         .where(WordGroup.user_id == user.id, func.lower(Word.english).in_(english_list))
     )
     existing: dict[str, Word] = {}
@@ -112,20 +112,15 @@ async def upload_csv(
         if key not in existing:
             existing[key] = row
 
-    # Fill missing fields from DB
+    # Fill from DB
     for w in words:
         db_word = existing.get(w["english"].lower())
         if db_word:
-            if not w["chinese"] and db_word.chinese:
-                w["chinese"] = db_word.chinese
-            if not w["kk_phonetic"] and db_word.kk_phonetic:
-                w["kk_phonetic"] = db_word.kk_phonetic
-            if not w["example_sentence"] and db_word.example_sentence:
-                w["example_sentence"] = db_word.example_sentence
-            if not w["mnemonic"] and db_word.mnemonic:
-                w["mnemonic"] = db_word.mnemonic
+            for field in ("chinese", "kk_phonetic", "example_sentence", "mnemonic"):
+                if not w[field] and getattr(db_word, field):
+                    w[field] = getattr(db_word, field)
 
-    # For words still missing fields, call LLM (phrases skip mnemonic)
+    # LLM for missing fields
     words_for_llm = [
         w for w in words
         if not w["mnemonic"] or not w["chinese"] or not w["kk_phonetic"] or not w["example_sentence"]
@@ -156,7 +151,6 @@ async def upload_csv(
             if lr.mnemonic_options:
                 mnemonic_options_map[w["english"].lower()] = lr.mnemonic_options
 
-    # Build response with mnemonic_options
     response_words = []
     for w in words:
         entry = {**w}
@@ -173,6 +167,8 @@ async def upload_csv(
     }
 
 
+# --- Search ---
+
 @router.get("/search-words", response_model=list[WordSearchResult])
 async def search_words(
     q: str = Query(..., min_length=4),
@@ -185,22 +181,18 @@ async def search_words(
         .where(WordGroup.user_id == user.id, Word.english.ilike(f"%{q}%"))
         .order_by(Word.english)
     )
-    rows = result.all()
     return [
         WordSearchResult(
-            id=word.id,
-            english=word.english,
-            chinese=word.chinese,
-            kk_phonetic=word.kk_phonetic,
-            mnemonic=word.mnemonic,
-            example_sentence=word.example_sentence,
-            sort_order=word.sort_order,
-            group_title=title,
-            group_saved_date=saved_date,
+            id=word.id, english=word.english, chinese=word.chinese,
+            kk_phonetic=word.kk_phonetic, mnemonic=word.mnemonic,
+            example_sentence=word.example_sentence, sort_order=word.sort_order,
+            group_title=title, group_saved_date=saved_date,
         )
-        for word, title, saved_date in rows
+        for word, title, saved_date in result.all()
     ]
 
+
+# --- CRUD ---
 
 @router.post("/word-groups", response_model=WordGroupOut)
 async def create_word_group(
@@ -211,26 +203,18 @@ async def create_word_group(
     group = WordGroup(title=payload.title, saved_date=payload.saved_date, user_id=user.id)
     db.add(group)
     await db.flush()
-
     for i, w in enumerate(payload.words):
-        word = Word(
-            group_id=group.id,
-            english=w.english,
-            chinese=w.chinese,
-            kk_phonetic=w.kk_phonetic,
-            mnemonic=w.mnemonic,
+        db.add(Word(
+            group_id=group.id, english=w.english, chinese=w.chinese,
+            kk_phonetic=w.kk_phonetic, mnemonic=w.mnemonic,
             example_sentence=w.example_sentence,
             sort_order=w.sort_order if w.sort_order else i,
-        )
-        db.add(word)
-
+        ))
     await db.commit()
-
     result = await db.execute(
         select(WordGroup).options(selectinload(WordGroup.words)).where(WordGroup.id == group.id)
     )
-    group = result.scalar_one()
-    return group
+    return result.scalar_one()
 
 
 @router.get("/word-groups", response_model=list[WordGroupSummary])
@@ -242,19 +226,13 @@ async def list_word_groups(
     db: AsyncSession = Depends(get_db),
 ):
     stmt = (
-        select(
-            WordGroup.id,
-            WordGroup.title,
-            WordGroup.saved_date,
-            WordGroup.created_at,
-            func.count(Word.id).label("word_count"),
-        )
+        select(WordGroup.id, WordGroup.title, WordGroup.saved_date, WordGroup.created_at,
+               func.count(Word.id).label("word_count"))
         .outerjoin(Word)
         .where(WordGroup.user_id == user.id)
         .group_by(WordGroup.id)
         .order_by(WordGroup.saved_date.desc())
     )
-
     if title:
         stmt = stmt.where(WordGroup.title.ilike(f"%{title}%"))
     if date_from:
@@ -263,13 +241,10 @@ async def list_word_groups(
         stmt = stmt.where(WordGroup.saved_date <= date_to)
 
     result = await db.execute(stmt)
-    rows = result.all()
     return [
-        WordGroupSummary(
-            id=r.id, title=r.title, saved_date=r.saved_date,
-            created_at=r.created_at, word_count=r.word_count,
-        )
-        for r in rows
+        WordGroupSummary(id=r.id, title=r.title, saved_date=r.saved_date,
+                         created_at=r.created_at, word_count=r.word_count)
+        for r in result.all()
     ]
 
 
@@ -280,8 +255,7 @@ async def get_word_group(
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(WordGroup)
-        .options(selectinload(WordGroup.words))
+        select(WordGroup).options(selectinload(WordGroup.words))
         .where(WordGroup.id == group_id, WordGroup.user_id == user.id)
     )
     group = result.scalar_one_or_none()
@@ -290,18 +264,16 @@ async def get_word_group(
     return group
 
 
+# --- Export ---
+
 @router.get("/word-groups/{group_id}/csv")
 async def export_word_group_csv(
     group_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    from urllib.parse import quote
-    from app.services.file_store import save_file
-
     result = await db.execute(
-        select(WordGroup)
-        .options(selectinload(WordGroup.words))
+        select(WordGroup).options(selectinload(WordGroup.words))
         .where(WordGroup.id == group_id, WordGroup.user_id == user.id)
     )
     group = result.scalar_one_or_none()
@@ -309,32 +281,14 @@ async def export_word_group_csv(
         raise HTTPException(status_code=404, detail="Word group not found")
 
     headers = ["英文", "中文", "KK 音標", "故事", "例句"]
-    rows = []
-    for w in group.words:
-        rows.append([
-            w.english,
-            w.chinese or "",
-            w.kk_phonetic or "",
-            w.mnemonic or "",
-            w.example_sentence or "",
-        ])
-
-    lines = [",".join(f'"{h}"' for h in headers)]
-    for row in rows:
-        lines.append(",".join(f'"{c.replace(chr(34), chr(34)+chr(34))}"' for c in row))
-    csv_content = "\ufeff" + "\n".join(lines)
-    csv_bytes = csv_content.encode("utf-8")
-
+    rows = [
+        [w.english, w.chinese or "", w.kk_phonetic or "", w.mnemonic or "", w.example_sentence or ""]
+        for w in group.words
+    ]
     filename = f"{group.title}_{group.saved_date}.csv"
+    response, csv_bytes = build_csv_response(headers, rows, filename)
     await save_file(db, user.id, filename, "csv", csv_bytes)
-
-    buffer = io.BytesIO(csv_bytes)
-    encoded = quote(filename)
-    return StreamingResponse(
-        buffer,
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"},
-    )
+    return response
 
 
 @router.get("/word-groups/{group_id}/pdf")
@@ -343,102 +297,25 @@ async def export_word_group_pdf(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    from urllib.parse import quote
-
-    from fpdf import FPDF
-
     result = await db.execute(
-        select(WordGroup)
-        .options(selectinload(WordGroup.words))
+        select(WordGroup).options(selectinload(WordGroup.words))
         .where(WordGroup.id == group_id, WordGroup.user_id == user.id)
     )
     group = result.scalar_one_or_none()
     if not group:
         raise HTTPException(status_code=404, detail="Word group not found")
 
-    font_path = "/app/fonts/NotoSansTC-Regular.otf"
-    if not os.path.exists(font_path):
-        raise HTTPException(status_code=500, detail="CJK font not found")
-
-    font_path_latin = "/app/fonts/NotoSans-Regular.ttf"
-
-    pdf = FPDF(orientation="P", unit="mm", format="A4")
-    pdf.add_font("NotoSans", "", font_path, uni=True)
-    if os.path.exists(font_path_latin):
-        pdf.add_font("NotoSansLatin", "", font_path_latin, uni=True)
-        pdf.set_fallback_fonts(["NotoSansLatin"])
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-
-    # Title
-    pdf.set_font("NotoSans", size=16)
-    pdf.cell(0, 10, f"{group.title} ({group.saved_date})", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(4)
-
-    # Table header
-    col_widths = [30, 25, 35, 35, 65]
-    headers = ["英文", "中文", "KK 音標", "故事", "例句"]
-    pdf.set_font("NotoSans", size=10)
-    pdf.set_fill_color(24, 144, 255)
-    pdf.set_text_color(255, 255, 255)
-    for i, h in enumerate(headers):
-        pdf.cell(col_widths[i], 8, h, border=1, fill=True, align="C")
-    pdf.ln()
-
-    # Table rows
-    pdf.set_font("NotoSans", size=9)
-    pdf.set_text_color(0, 0, 0)
-    for row_idx, w in enumerate(group.words):
-        if row_idx % 2 == 1:
-            pdf.set_fill_color(245, 245, 245)
-        else:
-            pdf.set_fill_color(255, 255, 255)
-
-        cells = [
-            w.english,
-            w.chinese or "",
-            w.kk_phonetic or "",
-            w.mnemonic or "",
-            w.example_sentence or "",
-        ]
-
-        # Calculate row height based on longest cell
-        max_lines = 1
-        for i, cell in enumerate(cells):
-            cell_width = col_widths[i] - 2
-            text_width = pdf.get_string_width(cell)
-            lines = max(1, int(text_width / cell_width) + 1)
-            max_lines = max(max_lines, lines)
-        row_height = max(7, max_lines * 5)
-
-        x_start = pdf.get_x()
-        y_start = pdf.get_y()
-
-        # Check if we need a new page
-        if y_start + row_height > pdf.h - 15:
-            pdf.add_page()
-            y_start = pdf.get_y()
-
-        for i, cell in enumerate(cells):
-            pdf.set_xy(x_start + sum(col_widths[:i]), y_start)
-            pdf.multi_cell(col_widths[i], row_height / max_lines, cell, border=1, fill=True)
-
-        pdf.set_xy(x_start, y_start + row_height)
-
-    pdf_bytes = pdf.output()
-    # Save to file store
-    from app.services.file_store import save_file
-    filename = f"{group.title}_{group.saved_date}.pdf"
+    words = [
+        {"english": w.english, "chinese": w.chinese or "", "kk_phonetic": w.kk_phonetic or "",
+         "mnemonic": w.mnemonic or "", "example_sentence": w.example_sentence or ""}
+        for w in group.words
+    ]
+    response, pdf_bytes, filename = build_word_group_pdf(group.title, group.saved_date, words)
     await save_file(db, user.id, filename, "pdf", pdf_bytes)
+    return response
 
-    buffer = io.BytesIO(pdf_bytes)
-    encoded = quote(filename)
-    return StreamingResponse(
-        buffer,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"},
-    )
 
+# --- Batch Mark ---
 
 class BatchMarkRequest(PydanticBaseModel):
     word_ids: list[uuid.UUID]
@@ -452,8 +329,7 @@ async def batch_mark_words(
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(Word)
-        .join(WordGroup)
+        select(Word).join(WordGroup)
         .where(Word.id.in_(payload.word_ids), WordGroup.user_id == user.id)
     )
     words = result.scalars().all()
@@ -462,6 +338,8 @@ async def batch_mark_words(
     await db.commit()
     return {"ok": True, "updated": len(words)}
 
+
+# --- Update / Delete ---
 
 @router.put("/words/{word_id}", response_model=WordOut)
 async def update_word(
@@ -476,11 +354,8 @@ async def update_word(
     word = result.scalar_one_or_none()
     if not word:
         raise HTTPException(status_code=404, detail="Word not found")
-
-    update_data = payload.model_dump(exclude_unset=True)
-    for key, value in update_data.items():
+    for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(word, key, value)
-
     await db.commit()
     await db.refresh(word)
     return word
@@ -501,5 +376,3 @@ async def delete_word_group(
     await db.delete(group)
     await db.commit()
     return {"ok": True}
-
-

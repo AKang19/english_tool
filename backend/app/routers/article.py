@@ -1,32 +1,27 @@
-import datetime
+"""Article generation, audio/video export, and article CRUD."""
+
 import io
 import json
 import os
-import subprocess
-import tempfile
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel
-from pydub import AudioSegment
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import Article, User
+from app.services import audio_service, video_service
+from app.services.file_store import save_file
+from app.services.pdf_service import build_article_pdf
 
 router = APIRouter(prefix="/api", tags=["article"])
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-VOICE_MAP = {
-    "A": "alloy",
-    "B": "nova",
-    "C": "echo",
-    "D": "shimmer",
-}
 
 
 # --- Schemas ---
@@ -39,7 +34,7 @@ class Sentence(BaseModel):
 
 class GenerateArticleRequest(BaseModel):
     words: list[str]
-    mode: str = "article"  # "article" or "dialogue"
+    mode: str = "article"
     ratio: float = 0.9
 
 
@@ -47,6 +42,16 @@ class GenerateArticleResponse(BaseModel):
     title: str
     sentences: list[Sentence]
     used_words: list[str]
+
+
+class AudioVideoRequest(BaseModel):
+    sentences: list[Sentence]
+
+
+class ArticlePdfRequest(BaseModel):
+    title: str
+    sentences: list[Sentence]
+    used_words: list[str] = []
 
 
 class SaveArticleRequest(BaseModel):
@@ -66,7 +71,7 @@ class ArticleOut(BaseModel):
     ratio: float
     sentences: list[Sentence]
     used_words: list[str]
-    created_at: datetime.datetime
+    created_at: datetime
 
     model_config = {"from_attributes": True}
 
@@ -75,13 +80,20 @@ class ArticleSummary(BaseModel):
     id: uuid.UUID
     title: str
     mode: str
-    created_at: datetime.datetime
+    created_at: datetime
 
     model_config = {"from_attributes": True}
 
 
-class AudioVideoRequest(BaseModel):
-    sentences: list[Sentence]
+class ReviewWord(BaseModel):
+    english: str
+    chinese: str | None = None
+    kk_phonetic: str | None = None
+    mnemonic: str | None = None
+
+
+class ReviewVideoRequest(BaseModel):
+    words: list[ReviewWord]
 
 
 # --- Article Generation ---
@@ -146,17 +158,7 @@ async def generate_article(
     return GenerateArticleResponse(**data)
 
 
-# --- Audio Generation ---
-
-async def _generate_sentence_audio(text: str, voice: str) -> bytes:
-    response = await client.audio.speech.create(
-        model="tts-1",
-        voice=voice,
-        input=text,
-        response_format="mp3",
-    )
-    return response.content
-
+# --- Audio ---
 
 @router.post("/generate-audio")
 async def generate_audio(
@@ -164,22 +166,11 @@ async def generate_audio(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    combined = AudioSegment.empty()
-    pause = AudioSegment.silent(duration=500)  # 500ms between sentences
+    sentences = [s.model_dump() for s in request.sentences]
+    mp3_bytes = await audio_service.build_combined_audio(sentences)
 
-    for sentence in request.sentences:
-        voice = VOICE_MAP.get(sentence.speaker or "", "alloy")
-        audio_bytes = await _generate_sentence_audio(sentence.text, voice)
-        segment = AudioSegment.from_mp3(io.BytesIO(audio_bytes))
-        combined += segment + pause
-
-    buffer = io.BytesIO()
-    combined.export(buffer, format="mp3")
-    mp3_bytes = buffer.getvalue()
-
-    from app.services.file_store import save_file
-    from datetime import datetime as dt3
-    await save_file(db, user.id, f"{dt3.now().strftime('%Y-%m-%d')}_article.mp3", "mp3", mp3_bytes)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    await save_file(db, user.id, f"{today}_article.mp3", "mp3", mp3_bytes)
 
     return StreamingResponse(
         io.BytesIO(mp3_bytes),
@@ -188,15 +179,7 @@ async def generate_audio(
     )
 
 
-# --- Video Generation ---
-
-def _seconds_to_srt_time(seconds: float) -> str:
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int((seconds % 1) * 1000)
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-
+# --- Video ---
 
 @router.post("/generate-video")
 async def generate_video(
@@ -204,67 +187,15 @@ async def generate_video(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # Generate audio for each sentence and track timing
-    segments: list[tuple[str, AudioSegment]] = []
-    pause = AudioSegment.silent(duration=500)
+    sentences = [s.model_dump() for s in request.sentences]
+    mp3_bytes, timings = await audio_service.build_audio_with_timing(sentences)
+    video_bytes = video_service.build_video_from_audio_and_timings(mp3_bytes, timings)
 
-    for sentence in request.sentences:
-        voice = VOICE_MAP.get(sentence.speaker or "", "alloy")
-        audio_bytes = await _generate_sentence_audio(sentence.text, voice)
-        segment = AudioSegment.from_mp3(io.BytesIO(audio_bytes))
-        en_line = f"{sentence.speaker}: {sentence.text}" if sentence.speaker else sentence.text
-        display = f"{en_line}\n{sentence.chinese}" if sentence.chinese else en_line
-        segments.append((display, segment))
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    await save_file(db, user.id, f"{today}_article.mp4", "mp4", video_bytes)
 
-    # Build combined audio and SRT
-    combined = AudioSegment.empty()
-    srt_lines = []
-    current_time = 0.0
-
-    for i, (display_text, segment) in enumerate(segments):
-        start = current_time
-        end = current_time + len(segment) / 1000.0
-        srt_lines.append(f"{i + 1}")
-        srt_lines.append(f"{_seconds_to_srt_time(start)} --> {_seconds_to_srt_time(end)}")
-        srt_lines.append(display_text)
-        srt_lines.append("")
-        combined += segment + pause
-        current_time = end + 0.5  # 500ms pause
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        audio_path = os.path.join(tmpdir, "audio.mp3")
-        srt_path = os.path.join(tmpdir, "subs.srt")
-        output_path = os.path.join(tmpdir, "output.mp4")
-
-        combined.export(audio_path, format="mp3")
-        with open(srt_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(srt_lines))
-
-        duration = len(combined) / 1000.0
-
-        # ffmpeg: black video + burned subtitles + audio
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i", f"color=c=black:s=1280x720:d={duration}",
-            "-i", audio_path,
-            "-vf", f"subtitles={srt_path}:fontsdir=/app/fonts:force_style='FontName=Noto Sans CJK TC,FontSize=28,PrimaryColour=&Hffffff,Alignment=2,MarginV=40'",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "28",
-            "-c:a", "aac", "-b:a", "128k",
-            "-shortest",
-            output_path,
-        ]
-        subprocess.run(cmd, check=True, capture_output=True)
-
-        with open(output_path, "rb") as f:
-            video_bytes = f.read()
-
-    from app.services.file_store import save_file
-    from datetime import datetime as dt4
-    await save_file(db, user.id, f"{dt4.now().strftime('%Y-%m-%d')}_article.mp4", "mp4", video_bytes)
-
-    buffer = io.BytesIO(video_bytes)
     return StreamingResponse(
-        buffer,
+        io.BytesIO(video_bytes),
         media_type="video/mp4",
         headers={"Content-Disposition": "attachment; filename=article.mp4"},
     )
@@ -272,99 +203,67 @@ async def generate_video(
 
 # --- Article PDF ---
 
-class ArticlePdfRequest(BaseModel):
-    title: str
-    sentences: list[Sentence]
-    used_words: list[str] = []
-
-
 @router.post("/generate-article-pdf")
-async def generate_article_pdf(
+async def generate_article_pdf_endpoint(
     request: ArticlePdfRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    from urllib.parse import quote
-    from fpdf import FPDF
-
-    font_path = "/app/fonts/NotoSansTC-Regular.otf"
-
-    font_path_latin = "/app/fonts/NotoSans-Regular.ttf"
-
-    pdf = FPDF(orientation="P", unit="mm", format="A4")
-    if os.path.exists(font_path):
-        pdf.add_font("NotoSans", "", font_path, uni=True)
-    if os.path.exists(font_path_latin):
-        pdf.add_font("NotoSansLatin", "", font_path_latin, uni=True)
-        pdf.set_fallback_fonts(["NotoSansLatin"])
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-
-    from datetime import datetime as dt
-    today_str = dt.now().strftime("%Y-%m-%d")
-    pdf.set_font("NotoSans", size=16)
-    pdf.cell(0, 10, f"{today_str} {request.title}", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(4)
-
-    import re
-
-    # Build regex for keyword highlighting (case-insensitive, word boundary)
-    if request.used_words:
-        kw_pattern = re.compile(
-            r'\b(' + '|'.join(re.escape(w) for w in sorted(request.used_words, key=len, reverse=True)) + r')\b',
-            re.IGNORECASE,
-        )
-    else:
-        kw_pattern = None
-
-    def write_highlighted(text: str, size: int, line_h: float):
-        """Write text with keywords in blue."""
-        pdf.set_font("NotoSans", size=size)
-        if not kw_pattern:
-            pdf.write(line_h, text)
-            return
-        parts = kw_pattern.split(text)
-        for part in parts:
-            if kw_pattern.match(part):
-                pdf.set_text_color(24, 144, 255)
-                pdf.write(line_h, part)
-                pdf.set_text_color(0, 0, 0)
-            else:
-                pdf.write(line_h, part)
-
-    pdf.set_font("NotoSans", size=11)
-    for s in request.sentences:
-        if s.speaker:
-            pdf.set_text_color(100, 100, 100)
-            pdf.set_font("NotoSans", size=11)
-            pdf.write(7, f"{s.speaker}: ")
-            pdf.set_text_color(0, 0, 0)
-        write_highlighted(s.text, 11, 7)
-        pdf.ln()
-        if s.chinese:
-            pdf.set_x(pdf.l_margin)
-            pdf.set_text_color(100, 100, 100)
-            pdf.set_font("NotoSans", size=10)
-            pdf.multi_cell(0, 6, s.chinese)
-            pdf.set_text_color(0, 0, 0)
-        pdf.ln(2)
-
-    pdf_bytes = pdf.output()
-    from app.services.file_store import save_file
-    from datetime import datetime as dt2
-    filename = f"{dt2.now().strftime('%Y-%m-%d')}_{request.title}.pdf"
+    sentences = [s.model_dump() for s in request.sentences]
+    response, pdf_bytes, filename = build_article_pdf(
+        request.title, sentences, request.used_words
+    )
     await save_file(db, user.id, filename, "pdf", pdf_bytes)
+    return response
 
-    buffer = io.BytesIO(pdf_bytes)
-    encoded = quote(filename)
+
+# --- Review Video ---
+
+@router.post("/generate-review-video")
+async def generate_review_video(
+    request: ReviewVideoRequest,
+    user: User = Depends(get_current_user),
+):
+    if not request.words:
+        raise HTTPException(status_code=400, detail="No words provided")
+
+    # Build sentences for audio + timing
+    sentences = []
+    for w in request.words:
+        lines = [w.english]
+        if w.kk_phonetic:
+            lines.append(w.kk_phonetic)
+        if w.chinese:
+            lines.append(w.chinese)
+        if w.mnemonic:
+            lines.append(w.mnemonic)
+        display = "\n".join(lines)
+        sentences.append({"text": w.english, "display": display})
+
+    # Generate audio with extra reading time
+    mp3_bytes, timings = await audio_service.build_audio_with_timing(
+        [{"text": s["text"]} for s in sentences], pause_ms=800
+    )
+
+    # Adjust timings to use display text and add reading time
+    adjusted = []
+    for i, (start, end, _) in enumerate(timings):
+        display = sentences[i]["display"]
+        reading_time = max(2.0, len(display) * 0.05)
+        adjusted.append((start, end + reading_time, display))
+
+    video_bytes = video_service.build_video_from_audio_and_timings(
+        mp3_bytes, adjusted, font_size=48, alignment=5, margin_v=10
+    )
+
     return StreamingResponse(
-        buffer,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"},
+        io.BytesIO(video_bytes),
+        media_type="video/mp4",
+        headers={"Content-Disposition": "attachment; filename=review.mp4"},
     )
 
 
-# --- Save / Load Articles ---
+# --- Article CRUD ---
 
 @router.post("/articles", response_model=ArticleOut)
 async def save_article(
@@ -430,102 +329,3 @@ async def delete_article(
     await db.delete(article)
     await db.commit()
     return {"ok": True}
-
-
-# --- Review MP4 (word-by-word with mnemonic) ---
-
-class ReviewWord(BaseModel):
-    english: str
-    chinese: str | None = None
-    kk_phonetic: str | None = None
-    mnemonic: str | None = None
-
-
-class ReviewVideoRequest(BaseModel):
-    words: list[ReviewWord]
-
-
-@router.post("/generate-review-video")
-async def generate_review_video(
-    request: ReviewVideoRequest,
-    user: User = Depends(get_current_user),
-):
-    if not request.words:
-        raise HTTPException(status_code=400, detail="No words provided")
-
-    segments: list[tuple[str, AudioSegment]] = []
-    pause = AudioSegment.silent(duration=800)
-
-    for w in request.words:
-        # TTS: read the English word
-        audio_bytes = await _generate_sentence_audio(w.english, "alloy")
-        segment = AudioSegment.from_mp3(io.BytesIO(audio_bytes))
-
-        # Build display text for subtitle
-        lines = [w.english]
-        if w.kk_phonetic:
-            lines.append(w.kk_phonetic)
-        if w.chinese:
-            lines.append(w.chinese)
-        if w.mnemonic:
-            lines.append(w.mnemonic)
-        display = "\\N".join(lines)  # ASS/SRT newline
-
-        segments.append((display, segment))
-
-    # Build combined audio + SRT
-    combined = AudioSegment.empty()
-    srt_lines = []
-    current_ms = 0
-
-    pause_ms = 800
-    for i, (display_text, segment) in enumerate(segments):
-        reading_ms = max(2000, int(len(display_text) * 50))
-        segment_ms = len(segment)
-
-        # Total time for this word: audio + reading silence + pause
-        total_ms = segment_ms + reading_ms + pause_ms
-
-        start = current_ms / 1000.0
-        end = (current_ms + segment_ms + reading_ms) / 1000.0
-
-        srt_lines.append(f"{i + 1}")
-        srt_lines.append(f"{_seconds_to_srt_time(start)} --> {_seconds_to_srt_time(end)}")
-        srt_lines.append(display_text.replace("\\N", "\n"))
-        srt_lines.append("")
-
-        combined += segment + AudioSegment.silent(duration=reading_ms) + AudioSegment.silent(duration=pause_ms)
-        current_ms += total_ms
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        audio_path = os.path.join(tmpdir, "audio.mp3")
-        srt_path = os.path.join(tmpdir, "subs.srt")
-        output_path = os.path.join(tmpdir, "review.mp4")
-
-        combined.export(audio_path, format="mp3")
-        with open(srt_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(srt_lines))
-
-        duration = len(combined) / 1000.0
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i", f"color=c=black:s=1280x720:d={duration}",
-            "-i", audio_path,
-            "-vf", f"subtitles={srt_path}:fontsdir=/app/fonts:force_style='FontName=Noto Sans CJK TC,FontSize=48,PrimaryColour=&Hffffff,Alignment=5,MarginV=10'",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "28",
-            "-c:a", "aac", "-b:a", "128k",
-            "-shortest",
-            output_path,
-        ]
-        subprocess.run(cmd, check=True, capture_output=True)
-
-        with open(output_path, "rb") as f:
-            video_bytes = f.read()
-
-    buffer = io.BytesIO(video_bytes)
-    return StreamingResponse(
-        buffer,
-        media_type="video/mp4",
-        headers={"Content-Disposition": "attachment; filename=review.mp4"},
-    )
