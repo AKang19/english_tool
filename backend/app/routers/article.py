@@ -3,97 +3,28 @@
 import io
 import json
 import os
-import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
-from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import Article, User
+from app.schemas import (
+    ArticleOut, ArticlePdfRequest, ArticleSummary, AudioVideoRequest,
+    GenerateArticleRequest, GenerateArticleResponse, ReviewVideoRequest,
+    SaveArticleRequest,
+)
 from app.services import audio_service, video_service
 from app.services.file_store import save_file
 from app.services.pdf_service import build_article_pdf
 
 router = APIRouter(prefix="/api", tags=["article"])
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-
-# --- Schemas ---
-
-class Sentence(BaseModel):
-    speaker: str | None = None
-    text: str
-    chinese: str | None = None
-
-
-class GenerateArticleRequest(BaseModel):
-    words: list[str]
-    mode: str = "article"
-    ratio: float = 0.9
-
-
-class GenerateArticleResponse(BaseModel):
-    title: str
-    sentences: list[Sentence]
-    used_words: list[str]
-
-
-class AudioVideoRequest(BaseModel):
-    sentences: list[Sentence]
-
-
-class ArticlePdfRequest(BaseModel):
-    title: str
-    sentences: list[Sentence]
-    used_words: list[str] = []
-
-
-class SaveArticleRequest(BaseModel):
-    title: str
-    input_words: list[str]
-    mode: str
-    ratio: float
-    sentences: list[Sentence]
-    used_words: list[str]
-
-
-class ArticleOut(BaseModel):
-    id: uuid.UUID
-    title: str
-    input_words: list[str]
-    mode: str
-    ratio: float
-    sentences: list[Sentence]
-    used_words: list[str]
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class ArticleSummary(BaseModel):
-    id: uuid.UUID
-    title: str
-    mode: str
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class ReviewWord(BaseModel):
-    english: str
-    chinese: str | None = None
-    kk_phonetic: str | None = None
-    mnemonic: str | None = None
-
-
-class ReviewVideoRequest(BaseModel):
-    words: list[ReviewWord]
 
 
 # --- Article Generation ---

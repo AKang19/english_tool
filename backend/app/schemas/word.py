@@ -6,19 +6,6 @@ import uuid
 from pydantic import BaseModel
 
 
-# --- Auth ---
-
-class UserOut(BaseModel):
-    id: uuid.UUID
-    email: str
-    name: str
-    picture: str | None = None
-
-    model_config = {"from_attributes": True}
-
-
-# --- LLM Generation ---
-
 class WordGenerateRequest(BaseModel):
     english: str
     need_chinese: bool = True
@@ -44,8 +31,6 @@ class GenerateResponse(BaseModel):
     results: list[WordGenerateResult]
 
 
-# --- CRUD ---
-
 class WordCreate(BaseModel):
     english: str
     chinese: str | None = None
@@ -57,7 +42,7 @@ class WordCreate(BaseModel):
 
 class WordGroupCreate(BaseModel):
     title: str
-    saved_date: str  # e.g. "2026-03-22"
+    saved_date: str
     words: list[WordCreate]
 
 
