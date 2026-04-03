@@ -25,6 +25,7 @@ import {
   QuestionCircleOutlined,
   CloseCircleOutlined,
   ReloadOutlined,
+  SoundOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
 import SpeakButton from "../components/SpeakButton";
@@ -382,17 +383,20 @@ export default function ReviewPage() {
                                 key: "english",
                                 width: 150,
                                 render: (text: string, record: ReviewWordStat) => (
-                                  <Tooltip
-                                    title={
-                                      <div>
-                                        {record.kk_phonetic && <div>{record.kk_phonetic}</div>}
-                                        {record.mnemonic && <div>{record.mnemonic}</div>}
-                                        {!record.kk_phonetic && !record.mnemonic && <div>無額外資訊</div>}
-                                      </div>
-                                    }
-                                  >
-                                    <span style={{ cursor: "pointer", borderBottom: "1px dashed #999" }}>{text}</span>
-                                  </Tooltip>
+                                  <Space size={4}>
+                                    <Tooltip
+                                      title={
+                                        <div>
+                                          {record.kk_phonetic && <div>{record.kk_phonetic}</div>}
+                                          {record.mnemonic && <div>{record.mnemonic}</div>}
+                                          {!record.kk_phonetic && !record.mnemonic && <div>無額外資訊</div>}
+                                        </div>
+                                      }
+                                    >
+                                      <span style={{ cursor: "pointer", borderBottom: "1px dashed #999" }}>{text}</span>
+                                    </Tooltip>
+                                    <SpeakButton text={text} />
+                                  </Space>
                                 ),
                               },
                               { title: "中文", dataIndex: "chinese", key: "chinese", width: 150 },
@@ -545,12 +549,27 @@ export default function ReviewPage() {
         onClick={!flipped ? handleFlip : undefined}
       >
         {/* English - always visible */}
-        <Space align="center">
-          <Title level={1} style={{ marginBottom: flipped ? 24 : 0, fontSize: 42 }}>
-            {currentWord?.english}
-          </Title>
-          {currentWord && <SpeakButton text={currentWord.english} size="large" />}
-        </Space>
+        <Title level={1} style={{ marginBottom: 8, fontSize: 42 }}>
+          {currentWord?.english}
+        </Title>
+        {currentWord && (
+          <Button
+            type="default"
+            icon={<SoundOutlined />}
+            size="large"
+            onClick={(e) => {
+              e.stopPropagation();
+              const u = new SpeechSynthesisUtterance(currentWord.english);
+              u.lang = "en-US";
+              u.rate = 0.9;
+              speechSynthesis.cancel();
+              speechSynthesis.speak(u);
+            }}
+            style={{ marginBottom: flipped ? 24 : 0 }}
+          >
+            發音
+          </Button>
+        )}
 
         {/* Flipped content */}
         {flipped && currentWord && (
