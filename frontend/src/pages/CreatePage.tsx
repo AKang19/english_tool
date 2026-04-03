@@ -122,7 +122,9 @@ export default function CreatePage() {
   }, [rows, groupTitle, savedDate, currentDraftName]);
 
   const handleSaveDraft = () => {
-    const name = currentDraftName || groupTitle.trim() || `暫存 ${dayjs().format("MM/DD HH:mm")}`;
+    const prefix = groupTitle.trim() || "暫存";
+    const timestamp = dayjs().format("MM/DD HH:mm");
+    const name = `${prefix} ${timestamp}`;
     const drafts = loadAllDrafts();
     drafts[name] = { rows, groupTitle, savedDate };
     saveAllDrafts(drafts);
