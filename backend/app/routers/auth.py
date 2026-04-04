@@ -1,3 +1,5 @@
+import os
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -47,3 +49,24 @@ async def google_login(payload: GoogleLoginRequest, db: AsyncSession = Depends(g
 
     token = create_access_token(str(user.id))
     return LoginResponse(access_token=token, user=UserOut.model_validate(user))
+
+
+# --- Test-only endpoint (only available when E2E_TEST=1) ---
+
+if os.getenv("E2E_TEST") == "1":
+    @router.post("/test-login", response_model=LoginResponse)
+    async def test_login(db: AsyncSession = Depends(get_db)):
+        """Create or get a test user and return JWT. Only available in test mode."""
+        result = await db.execute(select(User).where(User.google_id == "e2e-test-user"))
+        user = result.scalar_one_or_none()
+        if not user:
+            user = User(
+                google_id="e2e-test-user",
+                email="e2e@test.com",
+                name="E2E Test User",
+            )
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+        token = create_access_token(str(user.id))
+        return LoginResponse(access_token=token, user=UserOut.model_validate(user))

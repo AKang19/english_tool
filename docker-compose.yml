@@ -10,6 +10,11 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U english_tool"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
 
   backend:
     build: ./backend
@@ -23,10 +28,12 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
       SMTP_EMAIL: ${SMTP_EMAIL}
       SMTP_APP_PASSWORD: ${SMTP_APP_PASSWORD}
+      E2E_TEST: ${E2E_TEST:-0}
     volumes:
       - filestore:/app/generated_files
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
   frontend:
     build: ./frontend
