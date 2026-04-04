@@ -147,6 +147,23 @@ def mock_openai():
         except (AttributeError, ModuleNotFoundError):
             pass
 
+    # Mock pydub AudioSegment to avoid decoding fake MP3 bytes
+    fake_segment = MagicMock()
+    fake_segment.__len__ = lambda self: 1000  # 1 second
+    fake_segment.__add__ = lambda self, other: self
+    fake_segment.export = MagicMock()
+    p_pydub = patch("app.services.audio_service.AudioSegment.from_mp3", return_value=fake_segment)
+    p_pydub.start()
+    patches.append(p_pydub)
+
+    p_empty = patch("app.services.audio_service.AudioSegment.empty", return_value=fake_segment)
+    p_empty.start()
+    patches.append(p_empty)
+
+    p_silent = patch("app.services.audio_service.AudioSegment.silent", return_value=fake_segment)
+    p_silent.start()
+    patches.append(p_silent)
+
     yield mock_client
 
     for p in patches:
