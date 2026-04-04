@@ -23,6 +23,7 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
       SMTP_EMAIL: ${SMTP_EMAIL}
       SMTP_APP_PASSWORD: ${SMTP_APP_PASSWORD}
+      E2E_TEST: ${E2E_TEST:-0}
     volumes:
       - filestore:/app/generated_files
     depends_on:
