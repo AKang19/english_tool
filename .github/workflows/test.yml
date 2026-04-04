@@ -61,24 +61,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Create .env for docker compose
+        run: |
+          cat > .env << 'EOF'
+          OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_CLIENT_ID=test-client-id
+          JWT_SECRET_KEY=ci-test-secret-key-32chars-long!!
+          SMTP_EMAIL=
+          SMTP_APP_PASSWORD=
+          E2E_TEST=1
+          EOF
+
       - name: Start services
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GOOGLE_CLIENT_ID: test-client-id
-          JWT_SECRET_KEY: ci-test-secret-key-32chars-long!!
-          E2E_TEST: "1"
         run: |
           docker compose up --build -d
-          # Wait for backend to be ready
-          for i in $(seq 1 30); do
-            curl -s http://localhost:8000/docs > /dev/null && break
-            echo "Waiting for backend... ($i)"
+          echo "Waiting for services..."
+          # Wait for backend
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8000/docs > /dev/null 2>&1; then
+              echo "Backend ready!"
+              break
+            fi
+            echo "Waiting for backend... ($i/60)"
             sleep 5
           done
+          # Verify test-login endpoint
+          curl -sf -X POST http://localhost:8000/api/auth/test-login || (echo "test-login failed!" && docker compose logs backend --tail=30 && exit 1)
           # Wait for frontend
-          for i in $(seq 1 15); do
-            curl -s http://localhost:3000 > /dev/null && break
-            echo "Waiting for frontend... ($i)"
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000 > /dev/null 2>&1; then
+              echo "Frontend ready!"
+              break
+            fi
+            echo "Waiting for frontend... ($i/30)"
             sleep 3
           done
 
@@ -89,20 +104,20 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install frontend dependencies
+      - name: Install dependencies and Playwright
         run: |
           cd frontend
           npm ci
-
-      - name: Install Playwright
-        run: |
-          cd frontend
           npx playwright install chromium --with-deps
 
       - name: Run E2E tests
         run: |
           cd frontend
           npx playwright test --reporter=list
+
+      - name: Show backend logs on failure
+        if: failure()
+        run: docker compose logs backend --tail=50
 
       - name: Upload test results on failure
         if: failure()
